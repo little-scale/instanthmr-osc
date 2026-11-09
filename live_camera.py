@@ -21,31 +21,36 @@ import onnxruntime as ort
 import rerun as rr
 import rerun.blueprint as rrb
 
-from instanthmr import HMRPrediction, JOINT_NAMES, MODELS, PosePipeline
+from instanthmr import HMRPrediction, JOINT_NAMES, MODELS, PosePipeline, resolve_model
+from instanthmr.models import resolve_body
+
+from landmark_body import LandmarkBody
 
 LEFT_HIP = JOINT_NAMES.index("left_hip")
 RIGHT_HIP = JOINT_NAMES.index("right_hip")
 
 
 class LiveGeometry(NamedTuple):
-    vertices: np.ndarray
+    vertices: np.ndarray | None
     joints_3d: np.ndarray
     joints_2d_normalized: np.ndarray
 
 
 def output_geometry(person: HMRPrediction, *, camera_space=False, mirror_x=False) -> LiveGeometry:
     """Return the preview geometry in metres and keypoints normalized to the input image."""
+    local = person.joints_3d_local
     if camera_space:
-        vertices, joints = person.vertices_cam, person.joints_3d_cam
+        offset = person.cam_trans
     else:
-        local = person.joints_3d_local
-        pelvis = (local[LEFT_HIP] + local[RIGHT_HIP]) * 0.5
-        vertices, joints = person.vertices_local - pelvis, local - pelvis
+        offset = -(local[LEFT_HIP] + local[RIGHT_HIP]) * 0.5
+    vertices = person.vertices_local + offset if person.vertices_local is not None else None
+    joints = local + offset
 
     height, width = person.image_shape
     image_joints = person.joints_2d / np.array([width, height], dtype=np.float32)
     if mirror_x:
-        vertices[:, 0] *= -1
+        if vertices is not None:
+            vertices[:, 0] *= -1
         joints[:, 0] *= -1
         image_joints[:, 0] = 1 - image_joints[:, 0]
     return LiveGeometry(vertices, joints, image_joints)
@@ -63,7 +68,8 @@ def osc_string(value):
 
 @contextmanager
 def open_osc(host, port):
-    landmarks = osc_string("/instanthmr/landmarks") + osc_string("," + "f" * (len(JOINT_NAMES) * 3))
+    tags = osc_string("," + "f" * len(JOINT_NAMES))
+    axis_headers = tuple(osc_string(f"/instanthmr/landmarks/{axis}") + tags for axis in "xyz")
     tracking = osc_string("/instanthmr/tracking") + osc_string(",i")
     try:
         family, kind, protocol, _, address = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
@@ -82,7 +88,8 @@ def open_osc(host, port):
                     sock.sendto(tracking + struct.pack(">i", tracked), address)
                     was_tracked = tracked
                 if tracked:
-                    sock.sendto(landmarks + joints.astype(">f4", copy=False).tobytes(), address)
+                    for header, values in zip(axis_headers, joints.astype(">f4", copy=False).T, strict=True):
+                        sock.sendto(header + values.tobytes(), address)
             except OSError as error:
                 raise SystemExit(f"Could not send OSC to {host}:{port}: {error}") from error
 
@@ -119,13 +126,14 @@ def camera_frames(capture):
 
 def infer_frames(pipeline, frames):
     """Yield the timestamp, upstream prediction (or None), and stage timings for each frame."""
-    elapsed = {"pose_onnx_ms": 0.0, "mesh_onnx_ms": 0.0}
+    body_stage = "landmark_onnx_ms" if pipeline.hmr.faces is None else "mesh_onnx_ms"
+    elapsed = {"pose_onnx_ms": 0.0, body_stage: 0.0}
     network_run, body_run = pipeline.hmr.network.run, pipeline.hmr.body.run
     instrument_session(pipeline.hmr.network, "pose_onnx_ms", elapsed)
-    instrument_session(pipeline.hmr.body, "mesh_onnx_ms", elapsed)
+    instrument_session(pipeline.hmr.body, body_stage, elapsed)
     try:
         for index, (timestamp, rgb) in enumerate(frames):
-            elapsed.update(pose_onnx_ms=0.0, mesh_onnx_ms=0.0)
+            elapsed["pose_onnx_ms"] = elapsed[body_stage] = 0.0
             start = time.perf_counter()
             result = pipeline(rgb, timestamp)
             pipeline_ms = (time.perf_counter() - start) * 1000
@@ -141,7 +149,8 @@ def infer_frames(pipeline, frames):
 @contextmanager
 def open_viewer(faces, *, camera_space=False, mirror_x=False):
     eye_z, target_z = (0, 3) if camera_space else (-3, 0)
-    view_name = "Camera-space mesh" if camera_space else "Hip-centred mesh"
+    space = "Camera-space" if camera_space else "Hip-centred"
+    view_name = f"{space} {'landmarks' if faces is None else 'mesh'}"
     if mirror_x:
         view_name += " (mirrored)"
     blueprint = rrb.Blueprint(rrb.Horizontal(
@@ -156,9 +165,10 @@ def open_viewer(faces, *, camera_space=False, mirror_x=False):
     stream = rr.binary_stream()
     rr.send_blueprint(blueprint)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
-    rr.log("world/body", rr.Mesh3D.from_fields(triangle_indices=output_faces(faces, mirror_x=mirror_x),
-                                             albedo_factor=[90, 170, 232]),
-           static=True)
+    if faces is not None:
+        rr.log("world/body", rr.Mesh3D.from_fields(triangle_indices=output_faces(faces, mirror_x=mirror_x),
+                                                 albedo_factor=[90, 170, 232]),
+               static=True)
     # Pipe inference results directly into the viewer without opening a network listener.
     executable = Path(sys.executable).with_name("rerun")
     with subprocess.Popen([str(executable), "--memory-limit", "512MB", "-"], stdin=subprocess.PIPE) as viewer:
@@ -183,6 +193,8 @@ def run_live(pipeline, frames, publish=None, *, camera_space=False, mirror_x=Fal
     completions = deque(maxlen=30)
     last_status = float("-inf")
     had_person = False
+    landmarks_only = pipeline.hmr.faces is None
+    body_label, body_stage = ("landmarks", "landmark_onnx_ms") if landmarks_only else ("mesh", "mesh_onnx_ms")
     with_inference = infer_frames(pipeline, frames)
     try:
         for timestamp, person, timings in with_inference:
@@ -197,7 +209,10 @@ def run_live(pipeline, frames, publish=None, *, camera_space=False, mirror_x=Fal
             if publish:
                 rr.set_time("camera_time", duration=timestamp)
                 if geometry is not None:
-                    rr.log("world/body", rr.Mesh3D.from_fields(vertex_positions=geometry.vertices))
+                    if landmarks_only:
+                        rr.log("world/body", rr.Points3D(geometry.joints_3d, radii=0.012, colors=[90, 170, 232]))
+                    else:
+                        rr.log("world/body", rr.Mesh3D.from_fields(vertex_positions=geometry.vertices))
                 elif had_person:
                     rr.log("world/body", rr.Clear(recursive=False))
                 for stage, ms in timings.items():
@@ -206,9 +221,9 @@ def run_live(pipeline, frames, publish=None, *, camera_space=False, mirror_x=Fal
                 publish()
             had_person = person is not None
             if now - last_status >= 1:
-                status = "mesh ready" if had_person else "waiting for a person"
+                status = f"{body_label} ready" if had_person else "waiting for a person"
                 print(f"{fps:5.1f} FPS | pipeline {timings['pipeline_ms']:5.1f} ms | "
-                      f"pose {timings['pose_onnx_ms']:5.1f} ms | mesh {timings['mesh_onnx_ms']:5.1f} ms | "
+                      f"pose {timings['pose_onnx_ms']:5.1f} ms | {body_label} {timings[body_stage]:5.1f} ms | "
                       f"{status}", flush=True)
                 last_status = now
     finally:
@@ -227,6 +242,7 @@ def main():
     parser.add_argument("--mirror-x", action="store_true", help="reflect the mesh horizontally")
     parser.add_argument("--osc-port", type=int, help="enable OSC and send to this UDP port")
     parser.add_argument("--osc-host", default="127.0.0.1", help="OSC receiver address (default: 127.0.0.1)")
+    parser.add_argument("--landmarks-only", action="store_true", help="compute 3D landmarks without the full mesh")
     parser.add_argument("--list-landmarks", action="store_true", help="print the landmark indices and exit")
     parser.add_argument("--frames", type=int, help="stop after this many processed frames")
     parser.add_argument("--headless", action="store_true", help="disable the 3D viewer")
@@ -243,10 +259,15 @@ def main():
         parser.error("Core ML is unavailable in this ONNX Runtime build. Use --device cpu.")
 
     print(f"Loading {args.model} fit {args.fit} for one person…", flush=True)
-    pipeline = PosePipeline(args.model, fit=args.fit, device=args.device, detector="nano", max_persons=1,
+    model = resolve_model(args.model, args.fit) if args.landmarks_only else args.model
+    pipeline = PosePipeline(model, fit=args.fit, device=args.device, detector="nano", max_persons=1,
                             detector_stride=args.detector_stride, pose_filter=args.pose_filter)
     if args.device == "coreml" and pipeline.hmr.provider != "CoreMLExecutionProvider":
         raise SystemExit("The pose session fell back to CPU. Use --device cpu to run that path.")
+    if args.landmarks_only:
+        pipeline.hmr.body = LandmarkBody(resolve_body(model))
+        pipeline.hmr.faces = None
+        pipeline.hmr.warmup(1)
 
     try:
         with open_camera(args.camera) as capture, ExitStack() as outputs:

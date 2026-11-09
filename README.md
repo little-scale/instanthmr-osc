@@ -48,87 +48,98 @@ Set your OSC receiver to UDP port 9000 and start the webcam with `--osc-port 900
 
 | OSC address | Arguments | When sent |
 | --- | --- | --- |
-| `/instanthmr/landmarks` | 210 floats as 70 consecutive `(x, y, z)` triples in metres | Each frame with a detected person |
+| `/instanthmr/landmarks/x` | 70 X coordinates in metres | Each frame with a detected person |
+| `/instanthmr/landmarks/y` | 70 Y coordinates in metres | Each frame with a detected person |
+| `/instanthmr/landmarks/z` | 70 Z coordinates in metres | Each frame with a detected person |
 | `/instanthmr/tracking` | One integer, `1` for tracked or `0` for absent | First frame, tracking changes, and shutdown if tracked |
 
-Landmark `i` starts at argument `3 * i` with zero-based indexing. For example, the left wrist is landmark 62, so it uses arguments 186–188. The OSC coordinates follow `--camera-space` and `--mirror-x`. Mirroring preserves the anatomical landmark names and message order. To send to another machine, add its receiver IP, for example `--osc-host 192.168.1.42 --osc-port 9000`.
+The three axes arrive as separate UDP packets. Landmark `i` is argument `i` in each axis message. For example, read argument 62 from X, Y, and Z for the left wrist. The OSC coordinates follow `--camera-space` and `--mirror-x`. Mirroring preserves the anatomical landmark names and message order. To send to another machine, add its receiver IP, for example `--osc-host 192.168.1.42 --osc-port 9000`.
+
+To skip the full mesh, install the optional ONNX package and pass `--landmarks-only`:
+
+```sh
+uv --cache-dir .uv-cache pip install --python .venv/bin/python onnx
+.venv/bin/python live_camera.py --pose-filter one-euro --camera-space --mirror-x --landmarks-only --osc-port 9000
+```
+
+This mode computes only the 468 body vertices needed to produce the 70 landmarks during live inference. The viewer shows the 3D landmark points. Add `--headless` for OSC and Terminal timings alone.
 
 ## Landmark reference
 
-The table lists all 70 [InstantHMR landmarks](https://github.com/Naturalpad-studio/InstantHMR/blob/aa4b7df48e1a91aa3b61d8e7e7d7db1f60b6ef52/instanthmr/skeleton.py) in OSC message order. Both the landmark index and the argument positions are zero-based.
+The table lists all 70 [InstantHMR landmarks](https://github.com/Naturalpad-studio/InstantHMR/blob/aa4b7df48e1a91aa3b61d8e7e7d7db1f60b6ef52/instanthmr/skeleton.py) in OSC message order. The zero-based index is the argument position in each axis message.
 
-| Index | Landmark | OSC arguments (XYZ) |
-| ---: | --- | --- |
-| 0 | `nose` | 0–2 |
-| 1 | `left_eye` | 3–5 |
-| 2 | `right_eye` | 6–8 |
-| 3 | `left_ear` | 9–11 |
-| 4 | `right_ear` | 12–14 |
-| 5 | `left_shoulder` | 15–17 |
-| 6 | `right_shoulder` | 18–20 |
-| 7 | `left_elbow` | 21–23 |
-| 8 | `right_elbow` | 24–26 |
-| 9 | `left_hip` | 27–29 |
-| 10 | `right_hip` | 30–32 |
-| 11 | `left_knee` | 33–35 |
-| 12 | `right_knee` | 36–38 |
-| 13 | `left_ankle` | 39–41 |
-| 14 | `right_ankle` | 42–44 |
-| 15 | `left_big_toe_tip` | 45–47 |
-| 16 | `left_small_toe_tip` | 48–50 |
-| 17 | `left_heel` | 51–53 |
-| 18 | `right_big_toe_tip` | 54–56 |
-| 19 | `right_small_toe_tip` | 57–59 |
-| 20 | `right_heel` | 60–62 |
-| 21 | `right_thumb_tip` | 63–65 |
-| 22 | `right_thumb_first_joint` | 66–68 |
-| 23 | `right_thumb_second_joint` | 69–71 |
-| 24 | `right_thumb_third_joint` | 72–74 |
-| 25 | `right_index_tip` | 75–77 |
-| 26 | `right_index_first_joint` | 78–80 |
-| 27 | `right_index_second_joint` | 81–83 |
-| 28 | `right_index_third_joint` | 84–86 |
-| 29 | `right_middle_tip` | 87–89 |
-| 30 | `right_middle_first_joint` | 90–92 |
-| 31 | `right_middle_second_joint` | 93–95 |
-| 32 | `right_middle_third_joint` | 96–98 |
-| 33 | `right_ring_tip` | 99–101 |
-| 34 | `right_ring_first_joint` | 102–104 |
-| 35 | `right_ring_second_joint` | 105–107 |
-| 36 | `right_ring_third_joint` | 108–110 |
-| 37 | `right_pinky_tip` | 111–113 |
-| 38 | `right_pinky_first_joint` | 114–116 |
-| 39 | `right_pinky_second_joint` | 117–119 |
-| 40 | `right_pinky_third_joint` | 120–122 |
-| 41 | `right_wrist` | 123–125 |
-| 42 | `left_thumb_tip` | 126–128 |
-| 43 | `left_thumb_first_joint` | 129–131 |
-| 44 | `left_thumb_second_joint` | 132–134 |
-| 45 | `left_thumb_third_joint` | 135–137 |
-| 46 | `left_index_tip` | 138–140 |
-| 47 | `left_index_first_joint` | 141–143 |
-| 48 | `left_index_second_joint` | 144–146 |
-| 49 | `left_index_third_joint` | 147–149 |
-| 50 | `left_middle_tip` | 150–152 |
-| 51 | `left_middle_first_joint` | 153–155 |
-| 52 | `left_middle_second_joint` | 156–158 |
-| 53 | `left_middle_third_joint` | 159–161 |
-| 54 | `left_ring_tip` | 162–164 |
-| 55 | `left_ring_first_joint` | 165–167 |
-| 56 | `left_ring_second_joint` | 168–170 |
-| 57 | `left_ring_third_joint` | 171–173 |
-| 58 | `left_pinky_tip` | 174–176 |
-| 59 | `left_pinky_first_joint` | 177–179 |
-| 60 | `left_pinky_second_joint` | 180–182 |
-| 61 | `left_pinky_third_joint` | 183–185 |
-| 62 | `left_wrist` | 186–188 |
-| 63 | `left_olecranon` | 189–191 |
-| 64 | `right_olecranon` | 192–194 |
-| 65 | `left_cubital_fossa` | 195–197 |
-| 66 | `right_cubital_fossa` | 198–200 |
-| 67 | `left_acromion` | 201–203 |
-| 68 | `right_acromion` | 204–206 |
-| 69 | `neck` | 207–209 |
+| Index | Landmark |
+| ---: | --- |
+| 0 | `nose` |
+| 1 | `left_eye` |
+| 2 | `right_eye` |
+| 3 | `left_ear` |
+| 4 | `right_ear` |
+| 5 | `left_shoulder` |
+| 6 | `right_shoulder` |
+| 7 | `left_elbow` |
+| 8 | `right_elbow` |
+| 9 | `left_hip` |
+| 10 | `right_hip` |
+| 11 | `left_knee` |
+| 12 | `right_knee` |
+| 13 | `left_ankle` |
+| 14 | `right_ankle` |
+| 15 | `left_big_toe_tip` |
+| 16 | `left_small_toe_tip` |
+| 17 | `left_heel` |
+| 18 | `right_big_toe_tip` |
+| 19 | `right_small_toe_tip` |
+| 20 | `right_heel` |
+| 21 | `right_thumb_tip` |
+| 22 | `right_thumb_first_joint` |
+| 23 | `right_thumb_second_joint` |
+| 24 | `right_thumb_third_joint` |
+| 25 | `right_index_tip` |
+| 26 | `right_index_first_joint` |
+| 27 | `right_index_second_joint` |
+| 28 | `right_index_third_joint` |
+| 29 | `right_middle_tip` |
+| 30 | `right_middle_first_joint` |
+| 31 | `right_middle_second_joint` |
+| 32 | `right_middle_third_joint` |
+| 33 | `right_ring_tip` |
+| 34 | `right_ring_first_joint` |
+| 35 | `right_ring_second_joint` |
+| 36 | `right_ring_third_joint` |
+| 37 | `right_pinky_tip` |
+| 38 | `right_pinky_first_joint` |
+| 39 | `right_pinky_second_joint` |
+| 40 | `right_pinky_third_joint` |
+| 41 | `right_wrist` |
+| 42 | `left_thumb_tip` |
+| 43 | `left_thumb_first_joint` |
+| 44 | `left_thumb_second_joint` |
+| 45 | `left_thumb_third_joint` |
+| 46 | `left_index_tip` |
+| 47 | `left_index_first_joint` |
+| 48 | `left_index_second_joint` |
+| 49 | `left_index_third_joint` |
+| 50 | `left_middle_tip` |
+| 51 | `left_middle_first_joint` |
+| 52 | `left_middle_second_joint` |
+| 53 | `left_middle_third_joint` |
+| 54 | `left_ring_tip` |
+| 55 | `left_ring_first_joint` |
+| 56 | `left_ring_second_joint` |
+| 57 | `left_ring_third_joint` |
+| 58 | `left_pinky_tip` |
+| 59 | `left_pinky_first_joint` |
+| 60 | `left_pinky_second_joint` |
+| 61 | `left_pinky_third_joint` |
+| 62 | `left_wrist` |
+| 63 | `left_olecranon` |
+| 64 | `right_olecranon` |
+| 65 | `left_cubital_fossa` |
+| 66 | `right_cubital_fossa` |
+| 67 | `left_acromion` |
+| 68 | `right_acromion` |
+| 69 | `neck` |
 
 ## Run a benchmark
 
